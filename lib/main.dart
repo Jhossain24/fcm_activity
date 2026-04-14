@@ -6,13 +6,17 @@ import 'firebase_options.dart';
 @pragma('vm:entry-point')
 Future<void> firebaseMessagingBackgroundHandler(RemoteMessage message) async {
   await Firebase.initializeApp(options: DefaultFirebaseOptions.currentPlatform);
-  print('Background message received: ${message.messageId}');
-  print('Background message data: ${message.data}');
+  debugPrint('Background message received: ${message.messageId}');
+}
+
+Future<void> initializeFirebase() async {
+  await Firebase.initializeApp(options: DefaultFirebaseOptions.currentPlatform);
 }
 
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
-  await Firebase.initializeApp(options: DefaultFirebaseOptions.currentPlatform);
+  await initializeFirebase();
+  await FirebaseMessaging.instance.setAutoInitEnabled(true);
   FirebaseMessaging.onBackgroundMessage(firebaseMessagingBackgroundHandler);
   runApp(const MyApp());
 }
@@ -24,11 +28,34 @@ class MyApp extends StatelessWidget {
   Widget build(BuildContext context) {
     return MaterialApp(
       title: 'FCM Activity 14',
-      theme: ThemeData(primarySwatch: Colors.blue),
+      theme: ThemeData(
+        colorScheme: ColorScheme.fromSeed(seedColor: Colors.blue),
+        useMaterial3: true,
+      ),
       home: const HomePage(),
       debugShowCheckedModeBanner: false,
     );
   }
+}
+
+class FCMService {
+  static Future<String?> getToken() async {
+    return await FirebaseMessaging.instance.getToken();
+  }
+
+  static Future<void> requestPermissions() async {
+    await FirebaseMessaging.instance.requestPermission(
+      alert: true,
+      badge: true,
+      sound: true,
+    );
+  }
+
+  static Stream<RemoteMessage> get onMessage => FirebaseMessaging.onMessage;
+  static Stream<RemoteMessage> get onMessageOpenedApp =>
+      FirebaseMessaging.onMessageOpenedApp;
+  static Future<RemoteMessage?> getInitialMessage() =>
+      FirebaseMessaging.instance.getInitialMessage();
 }
 
 class HomePage extends StatefulWidget {
@@ -39,74 +66,62 @@ class HomePage extends StatefulWidget {
 }
 
 class _HomePageState extends State<HomePage> {
-  String statusText = 'Waiting for a cloud message...';
-  String imagePath = 'assets/images/default.png';
-  String fcmToken = 'Getting token...';
-  String lastMessage = 'None yet';
+  String _statusText = 'Waiting for a cloud message...';
+  String _imagePath = 'assets/images/default.png';
+  String _fcmToken = 'Getting token...';
+  String _lastMessage = 'None yet';
+
+  final Map<String, String> _assetMap = {
+    'promo': 'assets/images/promo.png',
+    'default': 'assets/images/default.png',
+  };
 
   @override
   void initState() {
     super.initState();
-    setupFCM();
+    _setupFCM();
   }
 
-  Future<void> setupFCM() async {
-    NotificationSettings settings = await FirebaseMessaging.instance
-        .requestPermission(alert: true, badge: true, sound: true);
+  void _updateImageFromAsset(String? assetKey) {
+    _imagePath = _assetMap[assetKey] ?? _assetMap['default']!;
+  }
 
-    print('Permission granted: ${settings.authorizationStatus}');
+  Future<void> _setupFCM() async {
+    await FCMService.requestPermissions();
 
-    String? token = await FirebaseMessaging.instance.getToken();
+    final token = await FCMService.getToken();
+    setState(() => _fcmToken = token ?? 'No token');
+
+    FCMService.onMessage.listen(_handleForegroundMessage);
+    FCMService.onMessageOpenedApp.listen(_handleBackgroundOpen);
+
+    final initialMessage = await FCMService.getInitialMessage();
+    if (initialMessage != null) _handleTerminatedLaunch(initialMessage);
+  }
+
+  void _handleForegroundMessage(RemoteMessage message) {
     setState(() {
-      fcmToken = token ?? 'No token';
+      _statusText = message.notification?.title ?? 'Message received!';
+      _lastMessage =
+          'Title: ${message.notification?.title}\nBody: ${message.notification?.body}\nData: ${message.data}';
+      _updateImageFromAsset(message.data['asset']);
     });
-    print('FCM Token: $token');
+  }
 
-    FirebaseMessaging.onMessage.listen((RemoteMessage message) {
-      print('Foreground message received!');
-      print('Message data: ${message.data}');
-
-      setState(() {
-        statusText = message.notification?.title ?? 'Message received!';
-        lastMessage =
-            'Title: ${message.notification?.title}\nBody: ${message.notification?.body}\nData: ${message.data}';
-
-        if (message.data['asset'] == 'promo') {
-          imagePath = 'assets/images/promo.png';
-        } else if (message.data['asset'] == 'default') {
-          imagePath = 'assets/images/default.png';
-        } else {
-          imagePath = 'assets/images/default.png';
-        }
-      });
+  void _handleBackgroundOpen(RemoteMessage message) {
+    setState(() {
+      _statusText = 'Opened from notification!';
+      _lastMessage = 'Opened from background: ${message.data}';
+      _updateImageFromAsset(message.data['asset']);
     });
+  }
 
-    FirebaseMessaging.onMessageOpenedApp.listen((RemoteMessage message) {
-      print('App opened from background notification!');
-
-      setState(() {
-        statusText = 'Opened from notification!';
-        lastMessage = 'Opened from background: ${message.data}';
-
-        if (message.data['asset'] == 'promo') {
-          imagePath = 'assets/images/promo.png';
-        }
-      });
+  void _handleTerminatedLaunch(RemoteMessage message) {
+    setState(() {
+      _statusText = 'Launched from notification!';
+      _lastMessage = 'Launched from terminated: ${message.data}';
+      _updateImageFromAsset(message.data['asset']);
     });
-
-    RemoteMessage? initialMessage = await FirebaseMessaging.instance
-        .getInitialMessage();
-    if (initialMessage != null) {
-      print('App launched from terminated state with message!');
-      setState(() {
-        statusText = 'Launched from notification!';
-        lastMessage = 'Launched from terminated: ${initialMessage.data}';
-
-        if (initialMessage.data['asset'] == 'promo') {
-          imagePath = 'assets/images/promo.png';
-        }
-      });
-    }
   }
 
   @override
@@ -114,7 +129,7 @@ class _HomePageState extends State<HomePage> {
     return Scaffold(
       appBar: AppBar(
         title: const Text('FCM Activity #14'),
-        backgroundColor: Colors.blue,
+        backgroundColor: Theme.of(context).colorScheme.primary,
         foregroundColor: Colors.white,
       ),
       body: Padding(
@@ -122,47 +137,81 @@ class _HomePageState extends State<HomePage> {
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            Container(
-              padding: const EdgeInsets.all(12),
-              color: Colors.grey[200],
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  const Text('📱 FCM Token:', fontWeight: FontWeight.bold),
-                  Text(fcmToken, style: const TextStyle(fontSize: 10)),
-                ],
-              ),
-            ),
+            _buildTokenDisplay(),
             const SizedBox(height: 20),
-            Center(
-              child: Image.asset(
-                imagePath,
-                width: 150,
-                height: 150,
-                errorBuilder: (context, error, stackTrace) {
-                  return const Icon(Icons.image_not_supported, size: 150);
-                },
-              ),
-            ),
+            _buildImageDisplay(),
             const SizedBox(height: 20),
-            Container(
-              padding: const EdgeInsets.all(12),
-              color: Colors.blue[50],
-              child: Text(statusText, style: const TextStyle(fontSize: 16)),
-            ),
+            _buildStatusDisplay(),
             const SizedBox(height: 20),
-            const Text(
-              '📨 Last Message:',
-              style: TextStyle(fontWeight: FontWeight.bold),
-            ),
-            const SizedBox(height: 8),
-            Container(
-              padding: const EdgeInsets.all(12),
-              color: Colors.grey[100],
-              child: Text(lastMessage),
-            ),
+            _buildLastMessageDisplay(),
           ],
         ),
+      ),
+    );
+  }
+
+  Widget _buildTokenDisplay() {
+    return Container(
+      padding: const EdgeInsets.all(12),
+      decoration: BoxDecoration(
+        color: Colors.grey[200],
+        borderRadius: BorderRadius.circular(8),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          const Text('📱 FCM Token:', fontWeight: FontWeight.bold),
+          Text(_fcmToken, style: const TextStyle(fontSize: 10)),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildImageDisplay() {
+    return Center(
+      child: Image.asset(
+        _imagePath,
+        width: 150,
+        height: 150,
+        errorBuilder: (context, error, stackTrace) {
+          return const Icon(Icons.image_not_supported, size: 150);
+        },
+      ),
+    );
+  }
+
+  Widget _buildStatusDisplay() {
+    return Container(
+      padding: const EdgeInsets.all(12),
+      decoration: BoxDecoration(
+        color: Colors.blue[50],
+        borderRadius: BorderRadius.circular(8),
+      ),
+      child: Text(_statusText, style: const TextStyle(fontSize: 16)),
+    );
+  }
+
+  Widget _buildLastMessageDisplay() {
+    return Expanded(
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          const Text(
+            '📨 Last Message:',
+            style: TextStyle(fontWeight: FontWeight.bold),
+          ),
+          const SizedBox(height: 8),
+          Expanded(
+            child: Container(
+              padding: const EdgeInsets.all(12),
+              decoration: BoxDecoration(
+                color: Colors.grey[100],
+                borderRadius: BorderRadius.circular(8),
+              ),
+              child: SingleChildScrollView(child: Text(_lastMessage)),
+            ),
+          ),
+        ],
       ),
     );
   }
