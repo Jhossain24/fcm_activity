@@ -6,18 +6,13 @@ import 'firebase_options.dart';
 @pragma('vm:entry-point')
 Future<void> firebaseMessagingBackgroundHandler(RemoteMessage message) async {
   await Firebase.initializeApp(options: DefaultFirebaseOptions.currentPlatform);
-  debugPrint('Background message received: ${message.messageId}');
-}
-
-Future<void> initializeFirebase() async {
-  await Firebase.initializeApp(options: DefaultFirebaseOptions.currentPlatform);
+  await FCMRepository.handleBackgroundMessage(message);
 }
 
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
-  await initializeFirebase();
-  await FirebaseMessaging.instance.setAutoInitEnabled(true);
-  FirebaseMessaging.onBackgroundMessage(firebaseMessagingBackgroundHandler);
+  await Firebase.initializeApp(options: DefaultFirebaseOptions.currentPlatform);
+  await FCMRepository.initialize();
   runApp(const MyApp());
 }
 
@@ -38,24 +33,84 @@ class MyApp extends StatelessWidget {
   }
 }
 
-class FCMService {
-  static Future<String?> getToken() async {
-    return await FirebaseMessaging.instance.getToken();
+class FCMRepository {
+  static final FirebaseMessaging _messaging = FirebaseMessaging.instance;
+
+  static Future<void> initialize() async {
+    await _requestPermissions();
+    await FirebaseMessaging.onBackgroundMessage(
+      firebaseMessagingBackgroundHandler,
+    );
   }
 
-  static Future<void> requestPermissions() async {
-    await FirebaseMessaging.instance.requestPermission(
-      alert: true,
-      badge: true,
-      sound: true,
-    );
+  static Future<void> _requestPermissions() async {
+    await _messaging.requestPermission(alert: true, badge: true, sound: true);
+  }
+
+  static Future<String?> getToken() async {
+    return await _messaging.getToken();
   }
 
   static Stream<RemoteMessage> get onMessage => FirebaseMessaging.onMessage;
   static Stream<RemoteMessage> get onMessageOpenedApp =>
       FirebaseMessaging.onMessageOpenedApp;
   static Future<RemoteMessage?> getInitialMessage() =>
-      FirebaseMessaging.instance.getInitialMessage();
+      _messaging.getInitialMessage();
+
+  static Future<void> handleBackgroundMessage(RemoteMessage message) async {
+    debugPrint('Background message: ${message.messageId}');
+  }
+
+  static String getImagePathFromMessage(RemoteMessage message) {
+    const defaultPath = 'assets/images/default.png';
+    const promoPath = 'assets/images/promo.png';
+
+    final assetKey = message.data['asset'];
+    if (assetKey == 'promo') return promoPath;
+    return defaultPath;
+  }
+
+  static String formatMessageForDisplay(RemoteMessage message) {
+    return '''
+Title: ${message.notification?.title ?? 'No title'}
+Body: ${message.notification?.body ?? 'No body'}
+Data: ${message.data}
+''';
+  }
+}
+
+class MessageHandler {
+  final Function(String) onStatusChange;
+  final Function(String) onMessageChange;
+  final Function(String) onImageChange;
+
+  MessageHandler({
+    required this.onStatusChange,
+    required this.onMessageChange,
+    required this.onImageChange,
+  });
+
+  void handleForegroundMessage(RemoteMessage message) {
+    onStatusChange(message.notification?.title ?? 'Message received!');
+    onMessageChange(FCMRepository.formatMessageForDisplay(message));
+    onImageChange(FCMRepository.getImagePathFromMessage(message));
+  }
+
+  void handleBackgroundOpen(RemoteMessage message) {
+    onStatusChange('Opened from notification!');
+    onMessageChange(
+      'Opened from background:\n${FCMRepository.formatMessageForDisplay(message)}',
+    );
+    onImageChange(FCMRepository.getImagePathFromMessage(message));
+  }
+
+  void handleTerminatedLaunch(RemoteMessage message) {
+    onStatusChange('Launched from notification!');
+    onMessageChange(
+      'Launched from terminated:\n${FCMRepository.formatMessageForDisplay(message)}',
+    );
+    onImageChange(FCMRepository.getImagePathFromMessage(message));
+  }
 }
 
 class HomePage extends StatefulWidget {
@@ -66,149 +121,176 @@ class HomePage extends StatefulWidget {
 }
 
 class _HomePageState extends State<HomePage> {
+  late MessageHandler _messageHandler;
+
   String _statusText = 'Waiting for a cloud message...';
   String _imagePath = 'assets/images/default.png';
   String _fcmToken = 'Getting token...';
   String _lastMessage = 'None yet';
 
-  final Map<String, String> _assetMap = {
-    'promo': 'assets/images/promo.png',
-    'default': 'assets/images/default.png',
-  };
+  final GlobalKey<ScaffoldMessengerState> _scaffoldMessengerKey =
+      GlobalKey<ScaffoldMessengerState>();
 
   @override
   void initState() {
     super.initState();
+    _messageHandler = MessageHandler(
+      onStatusChange: (status) => setState(() => _statusText = status),
+      onMessageChange: (message) => setState(() => _lastMessage = message),
+      onImageChange: (path) => setState(() => _imagePath = path),
+    );
     _setupFCM();
   }
 
-  void _updateImageFromAsset(String? assetKey) {
-    _imagePath = _assetMap[assetKey] ?? _assetMap['default']!;
-  }
-
   Future<void> _setupFCM() async {
-    await FCMService.requestPermissions();
+    try {
+      final token = await FCMRepository.getToken();
+      setState(() => _fcmToken = token ?? 'No token');
 
-    final token = await FCMService.getToken();
-    setState(() => _fcmToken = token ?? 'No token');
+      FCMRepository.onMessage.listen(_messageHandler.handleForegroundMessage);
+      FCMRepository.onMessageOpenedApp.listen(
+        _messageHandler.handleBackgroundOpen,
+      );
 
-    FCMService.onMessage.listen(_handleForegroundMessage);
-    FCMService.onMessageOpenedApp.listen(_handleBackgroundOpen);
-
-    final initialMessage = await FCMService.getInitialMessage();
-    if (initialMessage != null) _handleTerminatedLaunch(initialMessage);
+      final initialMessage = await FCMRepository.getInitialMessage();
+      if (initialMessage != null) {
+        _messageHandler.handleTerminatedLaunch(initialMessage);
+      }
+    } catch (e) {
+      _showErrorSnackBar('Failed to initialize FCM: $e');
+    }
   }
 
-  void _handleForegroundMessage(RemoteMessage message) {
-    setState(() {
-      _statusText = message.notification?.title ?? 'Message received!';
-      _lastMessage =
-          'Title: ${message.notification?.title}\nBody: ${message.notification?.body}\nData: ${message.data}';
-      _updateImageFromAsset(message.data['asset']);
-    });
-  }
-
-  void _handleBackgroundOpen(RemoteMessage message) {
-    setState(() {
-      _statusText = 'Opened from notification!';
-      _lastMessage = 'Opened from background: ${message.data}';
-      _updateImageFromAsset(message.data['asset']);
-    });
-  }
-
-  void _handleTerminatedLaunch(RemoteMessage message) {
-    setState(() {
-      _statusText = 'Launched from notification!';
-      _lastMessage = 'Launched from terminated: ${message.data}';
-      _updateImageFromAsset(message.data['asset']);
-    });
+  void _showErrorSnackBar(String message) {
+    _scaffoldMessengerKey.currentState?.showSnackBar(
+      SnackBar(content: Text(message), backgroundColor: Colors.red),
+    );
   }
 
   @override
   Widget build(BuildContext context) {
     return Scaffold(
+      key: _scaffoldMessengerKey,
       appBar: AppBar(
         title: const Text('FCM Activity #14'),
         backgroundColor: Theme.of(context).colorScheme.primary,
         foregroundColor: Colors.white,
+        actions: [
+          IconButton(
+            icon: const Icon(Icons.refresh),
+            onPressed: _setupFCM,
+            tooltip: 'Refresh FCM Token',
+          ),
+        ],
       ),
       body: Padding(
         padding: const EdgeInsets.all(16.0),
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            _buildTokenDisplay(),
+            _buildTokenSection(),
             const SizedBox(height: 20),
-            _buildImageDisplay(),
+            _buildImageSection(),
             const SizedBox(height: 20),
-            _buildStatusDisplay(),
+            _buildStatusSection(),
             const SizedBox(height: 20),
-            _buildLastMessageDisplay(),
+            _buildMessageSection(),
           ],
         ),
       ),
     );
   }
 
-  Widget _buildTokenDisplay() {
-    return Container(
-      padding: const EdgeInsets.all(12),
-      decoration: BoxDecoration(
-        color: Colors.grey[200],
-        borderRadius: BorderRadius.circular(8),
-      ),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          const Text('📱 FCM Token:', fontWeight: FontWeight.bold),
-          Text(_fcmToken, style: const TextStyle(fontSize: 10)),
-        ],
+  Widget _buildTokenSection() {
+    return Card(
+      child: Padding(
+        padding: const EdgeInsets.all(12.0),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            const Row(
+              children: [
+                Icon(Icons.vpn_key, size: 16),
+                SizedBox(width: 4),
+                Text(
+                  'FCM Token:',
+                  style: TextStyle(fontWeight: FontWeight.bold),
+                ),
+              ],
+            ),
+            const SizedBox(height: 4),
+            SelectableText(_fcmToken, style: const TextStyle(fontSize: 10)),
+          ],
+        ),
       ),
     );
   }
 
-  Widget _buildImageDisplay() {
+  Widget _buildImageSection() {
     return Center(
-      child: Image.asset(
-        _imagePath,
-        width: 150,
-        height: 150,
-        errorBuilder: (context, error, stackTrace) {
-          return const Icon(Icons.image_not_supported, size: 150);
-        },
+      child: Card(
+        elevation: 4,
+        child: Padding(
+          padding: const EdgeInsets.all(16.0),
+          child: Image.asset(
+            _imagePath,
+            width: 120,
+            height: 120,
+            errorBuilder: (context, error, stackTrace) {
+              return const Icon(
+                Icons.broken_image,
+                size: 120,
+                color: Colors.grey,
+              );
+            },
+          ),
+        ),
       ),
     );
   }
 
-  Widget _buildStatusDisplay() {
-    return Container(
-      padding: const EdgeInsets.all(12),
-      decoration: BoxDecoration(
-        color: Colors.blue[50],
-        borderRadius: BorderRadius.circular(8),
+  Widget _buildStatusSection() {
+    return Card(
+      color: Colors.blue[50],
+      child: Padding(
+        padding: const EdgeInsets.all(12.0),
+        child: Row(
+          children: [
+            const Icon(Icons.notifications_active, size: 20),
+            const SizedBox(width: 8),
+            Expanded(
+              child: Text(_statusText, style: const TextStyle(fontSize: 16)),
+            ),
+          ],
+        ),
       ),
-      child: Text(_statusText, style: const TextStyle(fontSize: 16)),
     );
   }
 
-  Widget _buildLastMessageDisplay() {
+  Widget _buildMessageSection() {
     return Expanded(
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          const Text(
-            '📨 Last Message:',
-            style: TextStyle(fontWeight: FontWeight.bold),
+          const Row(
+            children: [
+              Icon(Icons.message, size: 16),
+              SizedBox(width: 4),
+              Text(
+                'Last Message:',
+                style: TextStyle(fontWeight: FontWeight.bold),
+              ),
+            ],
           ),
           const SizedBox(height: 8),
           Expanded(
-            child: Container(
-              padding: const EdgeInsets.all(12),
-              decoration: BoxDecoration(
-                color: Colors.grey[100],
-                borderRadius: BorderRadius.circular(8),
+            child: Card(
+              child: Padding(
+                padding: const EdgeInsets.all(12.0),
+                child: SingleChildScrollView(
+                  child: SelectableText(_lastMessage),
+                ),
               ),
-              child: SingleChildScrollView(child: Text(_lastMessage)),
             ),
           ),
         ],
